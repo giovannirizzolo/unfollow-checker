@@ -114,6 +114,10 @@ struct HomeView: View {
             .navigationDestination(isPresented: $navigateToAssist) {
                 AssistModeView(users: cleanupUsers)
             }
+            .task {
+                // Auto-restore on every launch; .onChange handles applying the data
+                syncService.restoreFromCache()
+            }
             .fullScreenCover(isPresented: $showLogin) {
                 LoginWebView {
                     showLogin = false
@@ -238,12 +242,21 @@ struct HomeView: View {
                 progressRow(label: "Fetching following", current: cur, total: tot)
 
             case .done:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.roast)
-                    Text("Sync complete").font(.caption).foregroundStyle(Color.roast)
-                    Spacer()
-                    Button("Sync again") { Task { await syncService.startSync() } }
-                        .font(.caption).foregroundStyle(Color.latte)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.roast)
+                        if let date = syncService.lastSyncDate {
+                            Text("Synced \(date.relativeFormatted)")
+                                .font(.caption).foregroundStyle(Color.roast)
+                        } else {
+                            Text("Data loaded").font(.caption).foregroundStyle(Color.roast)
+                        }
+                    }
+                    if syncService.hasValidSession {
+                        syncButton(label: "Sync again", icon: "arrow.clockwise") {
+                            Task { await syncService.startSync() }
+                        }
+                    }
                 }
 
             case .failed:
