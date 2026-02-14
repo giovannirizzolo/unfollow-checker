@@ -43,6 +43,11 @@ struct HomeView: View {
     @State private var store = WhitelistStore()
     @State private var navigateToAssist = false
 
+    // Instagram API
+    @State private var syncService = FollowerSyncService()
+    @State private var showLogin = false
+    @State private var syncError: String?
+
     var cleanupUsers: [String] {
         notFollowingBack.filter { !store.isWhitelisted($0) && !store.isDone($0) }
     }
@@ -90,6 +95,7 @@ struct HomeView: View {
                     VStack(spacing: 20) {
                         counterCard
                         ctaButton
+                        apiCard
                         importCard
                     }
                     .padding(16)
@@ -101,6 +107,25 @@ struct HomeView: View {
             .toolbarBackground(.visible, for: .navigationBar)
             .navigationDestination(isPresented: $navigateToAssist) {
                 AssistModeView(users: cleanupUsers)
+            }
+            .fullScreenCover(isPresented: $showLogin) {
+                LoginWebView {
+                    showLogin = false
+                    syncService.reloadSession()
+                    Task { await syncService.startSync() }
+                }
+            }
+            .onChange(of: syncService.state) { _, newState in
+                if case .done = newState { applyAPISync() }
+                if case .failed(let msg) = newState { syncError = msg }
+            }
+            .alert("Sync failed", isPresented: Binding(
+                get: { syncError != nil },
+                set: { if !$0 { syncError = nil } }
+            )) {
+                Button("OK") { syncError = nil }
+            } message: {
+                Text(syncError ?? "")
             }
         }
     }
@@ -175,6 +200,93 @@ struct HomeView: View {
         .padding(16)
         .background(Color.foam)
         .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    // MARK: - Instagram API card
+
+    private var apiCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Instagram connect")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.espresso)
+
+            switch syncService.state {
+            case .idle:
+                if syncService.hasValidSession {
+                    syncButton(label: "Sync followers", icon: "arrow.clockwise") {
+                        Task { await syncService.startSync() }
+                    }
+                } else {
+                    syncButton(label: "Connect Instagram", icon: "person.crop.circle.badge.plus") {
+                        showLogin = true
+                    }
+                }
+
+            case .validating:
+                progressRow(label: "Validating session…", current: nil, total: nil)
+
+            case .fetchingFollowers(let cur, let tot):
+                progressRow(label: "Fetching followers", current: cur, total: tot)
+
+            case .fetchingFollowing(let cur, let tot):
+                progressRow(label: "Fetching following", current: cur, total: tot)
+
+            case .done:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.roast)
+                    Text("Sync complete").font(.caption).foregroundStyle(Color.roast)
+                    Spacer()
+                    Button("Sync again") { Task { await syncService.startSync() } }
+                        .font(.caption).foregroundStyle(Color.latte)
+                }
+
+            case .failed:
+                syncButton(label: "Retry sync", icon: "arrow.clockwise") {
+                    Task { await syncService.startSync() }
+                }
+            }
+        }
+        .padding(16)
+        .background(Color.foam)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+
+    @ViewBuilder
+    private func syncButton(label: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: icon)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(Color.roast.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(Color.roast)
+    }
+
+    @ViewBuilder
+    private func progressRow(label: String, current: Int?, total: Int?) -> some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.mini).tint(Color.roast)
+            if let current, let total, total > 0 {
+                Text("\(label) \(current)/\(total)")
+                    .font(.caption).foregroundStyle(Color.latte)
+            } else {
+                Text(label).font(.caption).foregroundStyle(Color.latte)
+            }
+        }
+    }
+
+    // MARK: - Apply API sync result
+
+    private func applyAPISync() {
+        notFollowingBack = InstagramExportParser.computeNotFollowingBack(
+            followers: syncService.followers,
+            following: syncService.following
+        )
+        store.resetDone()
+        store.prune(keeping: Set(notFollowingBack))
+        store.recordUpdate()
     }
 
     // MARK: - Import column
