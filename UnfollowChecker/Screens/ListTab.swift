@@ -27,12 +27,10 @@ struct ListTab: View {
     // MARK: - Filter
 
     enum Filter: String, CaseIterable {
-        case all       = "All"
-        case todo      = "To Do"
-        case done      = "Done"
-        case whitelist = "Whitelisted"
-        case requested = "Requested"
-        case failed    = "Failed"
+        case all            = "All"
+        case notWhitelisted = "Not Whitelisted"
+        case whitelisted    = "Whitelisted"
+        case done           = "Done"
     }
 
     private var cleanupUsers: [String] {
@@ -42,12 +40,10 @@ struct ListTab: View {
     private var filtered: [String] {
         let base: [String]
         switch filter {
-        case .all:       base = notFollowingBack
-        case .todo:      base = notFollowingBack.filter { !store.isWhitelisted($0) && !store.isDone($0) }
-        case .done:      base = notFollowingBack.filter { store.isDone($0) }
-        case .whitelist: base = notFollowingBack.filter { store.isWhitelisted($0) }
-        case .requested: base = requestedUsernames
-        case .failed:    base = unfollowService.unavailableUsernames
+        case .all:            base = notFollowingBack.filter { !store.isDone($0) }
+        case .notWhitelisted: base = notFollowingBack.filter { !store.isDone($0) && !store.isWhitelisted($0) }
+        case .whitelisted:    base = notFollowingBack.filter { store.isWhitelisted($0) }
+        case .done:           base = notFollowingBack.filter { store.isDone($0) }
         }
         guard !query.isEmpty else { return base }
         return base.filter { $0.localizedCaseInsensitiveContains(query) }
@@ -55,24 +51,16 @@ struct ListTab: View {
 
     private func chipCount(for f: Filter) -> Int {
         switch f {
-        case .all:       return notFollowingBack.count
-        case .todo:      return notFollowingBack.filter { !store.isWhitelisted($0) && !store.isDone($0) }.count
-        case .done:      return notFollowingBack.filter { store.isDone($0) }.count
-        case .whitelist: return notFollowingBack.filter { store.isWhitelisted($0) }.count
-        case .requested: return requestedUsernames.count
-        case .failed:    return unfollowService.unavailableUsernames.count
+        case .all:            return notFollowingBack.filter { !store.isDone($0) }.count
+        case .notWhitelisted: return notFollowingBack.filter { !store.isDone($0) && !store.isWhitelisted($0) }.count
+        case .whitelisted:    return notFollowingBack.filter { store.isWhitelisted($0) }.count
+        case .done:           return notFollowingBack.filter { store.isDone($0) }.count
         }
     }
 
-    /// Only show "Requested" and "Failed" chips when they have content
+    /// Hide the Done chip when there's nothing in it
     private var visibleFilters: [Filter] {
-        Filter.allCases.filter { f in
-            switch f {
-            case .requested: return !requestedUsernames.isEmpty
-            case .failed:    return !unfollowService.unavailableUsernames.isEmpty
-            default:         return true
-            }
-        }
+        Filter.allCases.filter { $0 != .done || chipCount(for: .done) > 0 }
     }
 
     // MARK: - Body
@@ -109,7 +97,6 @@ struct ListTab: View {
             )) { uid in
                 UserDetailSheet(username: uid.value)
             }
-            .safeAreaInset(edge: .bottom) { unfollowBanner }
         }
     }
 
@@ -117,114 +104,12 @@ struct ListTab: View {
 
     @ToolbarContentBuilder
     private var toolbarItems: some ToolbarContent {
-        // Unfollow All — visible when on To Do filter and queue not already running
-        if filter == .todo, !cleanupUsers.isEmpty,
-           case .idle = unfollowService.state {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Unfollow All") {
-                    let targets = cleanupUsers.filter { username in
-                        !requestedUsernames.contains(username)
-                    }
-                    Task {
-                        await unfollowService.startUnfollow(
-                            usernames: targets,
-                            pks: userPks,
-                            store: store
-                        )
-                    }
-                }
-                .foregroundStyle(Color.roast)
-            }
-        }
-
-        // Also show Unfollow All when paused (allows resuming)
-        if filter == .todo, !cleanupUsers.isEmpty,
-           case .paused = unfollowService.state {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Resume") {
-                    let targets = cleanupUsers.filter { username in
-                        !requestedUsernames.contains(username)
-                    }
-                    Task {
-                        await unfollowService.startUnfollow(
-                            usernames: targets,
-                            pks: userPks,
-                            store: store
-                        )
-                    }
-                }
-                .foregroundStyle(Color.roast)
-            }
-        }
-
-        if !cleanupUsers.isEmpty, filter != .todo {
+        if !cleanupUsers.isEmpty {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Assist") { navigateToAssist = true }
                     .foregroundStyle(Color.roast)
             }
         }
-    }
-
-    // MARK: - Progress / summary banner
-
-    @ViewBuilder
-    private var unfollowBanner: some View {
-        switch unfollowService.state {
-        case .running(let cur, let tot):
-            HStack(spacing: 12) {
-                ProgressView().controlSize(.small).tint(Color.roast)
-                Text("Unfollowing \(cur)/\(tot)…")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Color.espresso)
-                Spacer()
-                Button("Stop") { unfollowService.pause() }
-                    .font(.subheadline)
-                    .foregroundStyle(Color.roast)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(.ultraThinMaterial)
-
-        case .done(let succeeded, let failed):
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.roast)
-                Text(doneSummary(succeeded: succeeded, failed: failed))
-                    .font(.subheadline)
-                    .foregroundStyle(Color.espresso)
-                Spacer()
-                Button("Dismiss") { unfollowService.state = .idle }
-                    .font(.caption)
-                    .foregroundStyle(Color.latte)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(.ultraThinMaterial)
-
-        case .paused:
-            HStack(spacing: 8) {
-                Image(systemName: "pause.circle.fill").foregroundStyle(Color.latte)
-                Text("Unfollow paused")
-                    .font(.subheadline)
-                    .foregroundStyle(Color.espresso)
-                Spacer()
-                Button("Dismiss") { unfollowService.state = .idle }
-                    .font(.caption)
-                    .foregroundStyle(Color.latte)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 14)
-            .background(.ultraThinMaterial)
-
-        default:
-            EmptyView()
-        }
-    }
-
-    private func doneSummary(succeeded: Int, failed: Int) -> String {
-        var parts: [String] = []
-        if succeeded > 0 { parts.append("Unfollowed \(succeeded)") }
-        if failed    > 0 { parts.append("\(failed) unavailable") }
-        return parts.joined(separator: " · ")
     }
 
     // MARK: - Filter chips
@@ -238,21 +123,13 @@ struct ListTab: View {
                             .font(.subheadline.weight(filter == f ? .semibold : .regular))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
-                            .background(filter == f ? chipColor(for: f) : Color.latte.opacity(0.18))
+                            .background(filter == f ? Color.roast : Color.latte.opacity(0.18))
                             .foregroundStyle(filter == f ? .white : Color.roast)
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.borderless)
                 }
             }
-        }
-    }
-
-    private func chipColor(for f: Filter) -> Color {
-        switch f {
-        case .requested: return Color.latte
-        case .failed:    return .red.opacity(0.7)
-        default:         return Color.roast
         }
     }
 

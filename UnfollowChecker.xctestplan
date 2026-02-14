@@ -1,0 +1,38 @@
+{
+  "configurations" : [
+    {
+      "id" : "B2CA193B-11CF-445F-ABC4-669D851BB6D8",
+      "name" : "Test Scheme Action",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "performanceAntipatternCheckerEnabled" : true,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:UnfollowChecker.xcodeproj",
+      "identifier" : "B77125D82F3FDD9F00817DB8",
+      "name" : "UnfollowChecker"
+    }
+  },
+  "testTargets" : [
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:UnfollowChecker.xcodeproj",
+        "identifier" : "B77125E52F3FDDA100817DB8",
+        "name" : "UnfollowCheckerTests"
+      }
+    },
+    {
+      "parallelizable" : true,
+      "target" : {
+        "containerPath" : "container:UnfollowChecker.xcodeproj",
+        "identifier" : "B77125EF2F3FDDA100817DB8",
+        "name" : "UnfollowCheckerUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

@@ -2,8 +2,6 @@
 //  HomeView.swift
 //  UnfollowChecker
 //
-//  Created by Giovanni Rizzolo on 13/02/26.
-//
 
 internal import SwiftUI
 import UniformTypeIdentifiers
@@ -30,26 +28,31 @@ extension Date {
 
 struct HomeView: View {
 
-    // Import state (kept for future re-enable)
-    @State private var followersData: Data?
-    @State private var followingData: Data?
-    @State private var followersStatus: ImportStatus = .idle
-    @State private var followingStatus: ImportStatus = .idle
-    @State private var showImporter = false
-    @State private var expecting: Expecting = .followers
-
     // Results
     @State private var notFollowingBack: [String] = []
     @State private var store = WhitelistStore()
 
-    // Instagram API
+    // Services
     @State private var syncService     = FollowerSyncService()
     @State private var unfollowService = UnfollowService()
-    @State private var showLogin       = false
-    @State private var syncError: String?
 
-    // Unfollow gate
+    // Navigation
+    @State private var selectedTab = 0
+    @State private var showLogin   = false
+
+    // Modals
+    @State private var showCleanupConfirm   = false
+    @State private var showCleanupProgress  = false
+    @State private var showOnboarding       = false
+    @AppStorage("hasSeenSafetyOnboarding") private var hasSeenOnboarding = false
+
+    // Alerts
+    @State private var syncError: String?
     @State private var showWhitelistWarning = false
+
+    // Auto-sync throttle (UI-only)
+    @State private var lastAutoSync: Date?
+    private let autoSyncInterval: TimeInterval = 15 * 60
 
     var cleanupUsers: [String] {
         notFollowingBack.filter { !store.isWhitelisted($0) && !store.isDone($0) }
@@ -57,17 +60,11 @@ struct HomeView: View {
     var whitelistedCount: Int { notFollowingBack.filter { store.isWhitelisted($0) }.count }
     var doneCount: Int        { notFollowingBack.filter { store.isDone($0) }.count }
 
-    enum Expecting { case followers, following }
-
-    enum ImportStatus: Equatable {
-        case idle, importing
-        case success(String), error(String)
-    }
-
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             homeTab
                 .tabItem { Label("Home", systemImage: "house.fill") }
+                .tag(0)
 
             ListTab(
                 notFollowingBack:   notFollowingBack,
@@ -75,14 +72,25 @@ struct HomeView: View {
                 userPks:            syncService.userPks
             )
             .tabItem { Label("List", systemImage: "list.bullet") }
+            .tag(1)
 
             WhitelistView(notFollowingBack: notFollowingBack)
                 .tabItem { Label("Whitelist", systemImage: "star.fill") }
+                .tag(2)
                 .badge(whitelistedCount)
         }
         .tint(Color.roast)
         .environment(store)
         .environment(unfollowService)
+        // Global cleanup progress banner across all tabs
+        .safeAreaInset(edge: .bottom) {
+            ProgressBanner(showProgressSheet: $showCleanupProgress)
+                .environment(unfollowService)
+        }
+        .sheet(isPresented: $showCleanupProgress) {
+            CleanupProgressView()
+                .environment(unfollowService)
+        }
     }
 
     // MARK: - Home tab
@@ -94,9 +102,9 @@ struct HomeView: View {
                 ScrollView {
                     VStack(spacing: 20) {
                         counterCard
-                        unfollowCard
+                        statusRow
+                        cleanupSection
                         apiCard
-                        // importCard
                     }
                     .padding(16)
                 }
@@ -105,8 +113,19 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.foam, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showOnboarding = true
+                    } label: {
+                        Image(systemName: "questionmark.circle")
+                            .foregroundStyle(Color.latte)
+                    }
+                }
+            }
             .task {
                 syncService.restoreFromCache()
+                triggerAutoSyncIfNeeded()
             }
             .fullScreenCover(isPresented: $showLogin) {
                 LoginWebView {
@@ -115,8 +134,24 @@ struct HomeView: View {
                     Task { await syncService.startSync() }
                 }
             }
+            .sheet(isPresented: $showOnboarding) {
+                SafetyOnboardingView()
+            }
+            .sheet(isPresented: $showCleanupConfirm) {
+                CleanupConfirmSheet(
+                    cleanupCount:   cleanupUsers.count,
+                    whitelistCount: whitelistedCount,
+                    hasActiveList:  store.activeID != nil,
+                    onStart:        startUnfollowNow
+                )
+            }
             .onChange(of: syncService.state) { _, newState in
-                if case .done = newState { applyAPISync() }
+                if case .done = newState {
+                    applyAPISync()
+                    if !hasSeenOnboarding {
+                        showOnboarding = true
+                    }
+                }
                 if case .failed(let msg) = newState { syncError = msg }
             }
             .alert("Sync failed", isPresented: Binding(
@@ -129,11 +164,11 @@ struct HomeView: View {
             }
             .alert("Whitelist not active", isPresented: $showWhitelistWarning) {
                 Button("Unfollow all \(cleanupUsers.count)", role: .destructive) {
-                    startUnfollowNow()
+                    showCleanupConfirm = true
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("You have a whitelist but it's not currently enabled. Every user who doesn't follow you back will be unfollowed. Go to the Whitelist tab to activate protection first.")
+                Text("You have a whitelist but it's not currently enabled. Every user who doesn't follow you back will be unfollowed.")
             }
         }
     }
@@ -194,41 +229,74 @@ struct HomeView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
-    // MARK: - Unfollow card
+    // MARK: - Status pills row
 
-    private var unfollowCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    @ViewBuilder
+    private var statusRow: some View {
+        let pills = activePills
+        if !pills.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(pills.indices, id: \.self) { i in
+                        pills[i]
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .padding(.horizontal, -16)
+        }
+    }
+
+    private var activePills: [AnyView] {
+        var result: [AnyView] = []
+
+        // Sync status
+        switch syncService.state {
+        case .validating, .fetchingFollowers, .fetchingFollowing:
+            result.append(AnyView(StatusPill(kind: .syncing)))
+        case .done:
+            if let date = syncService.lastSyncDate {
+                result.append(AnyView(StatusPill(kind: .synced(date))))
+            }
+        case .failed(let msg):
+            result.append(AnyView(StatusPill(kind: .syncError(msg) {
+                Task { await syncService.startSync() }
+            })))
+        default:
+            if let date = syncService.lastSyncDate {
+                result.append(AnyView(StatusPill(kind: .synced(date))))
+            }
+        }
+
+        // Cleanup status
+        if case .running(let cur, let tot) = unfollowService.state {
+            result.append(AnyView(StatusPill(kind: .cleaning(current: cur, total: tot))))
+        }
+
+        return result
+    }
+
+    // MARK: - Cleanup section
+
+    @ViewBuilder
+    private var cleanupSection: some View {
+        VStack(spacing: 12) {
             switch unfollowService.state {
 
-            // ── Idle / failed: primary action button ──────────────────────────
+            // ── Idle / failed: primary action + view list ──────────────
             case .idle, .failed:
-                if syncService.lastSyncDate == nil {
-                    // No sync yet — can't unfollow
-                    HStack(spacing: 8) {
-                        Image(systemName: "info.circle")
-                            .foregroundStyle(Color.latte)
-                        Text("Sync your Instagram account first")
-                            .font(.caption)
-                            .foregroundStyle(Color.latte)
-                    }
-                } else if cleanupUsers.isEmpty {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.seal.fill")
-                            .foregroundStyle(Color.roast)
-                        Text("No users to unfollow right now")
-                            .font(.caption)
-                            .foregroundStyle(Color.latte)
-                    }
-                } else {
+                if syncService.lastSyncDate != nil && !cleanupUsers.isEmpty {
                     if case .failed(let msg) = unfollowService.state {
                         Text(msg)
                             .font(.caption)
                             .foregroundStyle(.red)
                     }
-                    Button { triggerUnfollow() } label: {
+
+                    // Primary: Clean up
+                    Button { triggerCleanup() } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "person.fill.xmark")
-                            Text("Unfollow All (\(cleanupUsers.count))")
+                            Text("Clean up (\(cleanupUsers.count))")
                                 .fontWeight(.semibold)
                         }
                         .frame(maxWidth: .infinity)
@@ -238,13 +306,24 @@ struct HomeView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 14))
                     }
                     .buttonStyle(.borderless)
+
+                    // Secondary: View list
+                    Button { selectedTab = 1 } label: {
+                        Text("View list")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.latte.opacity(0.15))
+                            .foregroundStyle(Color.roast)
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.borderless)
                 }
 
-            // ── Running: fancy progress widget ────────────────────────────────
+            // ── Running: banner handled globally; show stop inline ─────
             case .running(let cur, let tot):
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Text("Unfollowing…")
+                        Text("Cleaning up…")
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(Color.espresso)
                         Spacer()
@@ -253,7 +332,6 @@ struct HomeView: View {
                             .foregroundStyle(Color.latte)
                     }
 
-                    // Fancy gradient progress bar
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
                             RoundedRectangle(cornerRadius: 6)
@@ -278,31 +356,46 @@ struct HomeView: View {
                     }
                     .frame(height: 10)
 
-                    Button {
-                        unfollowService.pause()
-                    } label: {
-                        Label("Stop", systemImage: "stop.fill")
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                            .background(Color.latte.opacity(0.15))
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(Color.roast)
-                }
+                    HStack(spacing: 8) {
+                        Button {
+                            unfollowService.pause()
+                        } label: {
+                            Label("Stop", systemImage: "stop.fill")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color.latte.opacity(0.15))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.roast)
 
-            // ── Paused ────────────────────────────────────────────────────────
+                        Button { showCleanupProgress = true } label: {
+                            Label("Details", systemImage: "arrow.up.right")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color.roast.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.roast)
+                    }
+                }
+                .padding(16)
+                .background(Color.foam)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+
+            // ── Paused ────────────────────────────────────────────────
             case .paused:
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 6) {
                         Image(systemName: "pause.circle.fill")
                             .foregroundStyle(Color.latte)
-                        Text("Unfollow paused")
+                        Text("Cleanup paused")
                             .font(.subheadline)
                             .foregroundStyle(Color.espresso)
                     }
                     HStack(spacing: 8) {
-                        Button { triggerUnfollow() } label: {
+                        Button { triggerCleanup() } label: {
                             Label("Resume", systemImage: "play.fill")
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
@@ -312,9 +405,7 @@ struct HomeView: View {
                         .buttonStyle(.borderless)
                         .foregroundStyle(Color.roast)
 
-                        Button {
-                            unfollowService.state = .idle
-                        } label: {
+                        Button { unfollowService.state = .idle } label: {
                             Text("Dismiss")
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 8)
@@ -325,8 +416,11 @@ struct HomeView: View {
                         .foregroundStyle(Color.latte)
                     }
                 }
+                .padding(16)
+                .background(Color.foam)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
 
-            // ── Done: summary ─────────────────────────────────────────────────
+            // ── Done: summary ─────────────────────────────────────────
             case .done(let succeeded, let failed):
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(spacing: 6) {
@@ -341,9 +435,7 @@ struct HomeView: View {
                                 .foregroundStyle(Color.latte)
                         }
                     }
-                    Button {
-                        unfollowService.state = .idle
-                    } label: {
+                    Button { unfollowService.state = .idle } label: {
                         Text("Dismiss")
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
@@ -353,11 +445,11 @@ struct HomeView: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(Color.latte)
                 }
+                .padding(16)
+                .background(Color.foam)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
             }
         }
-        .padding(16)
-        .background(Color.foam)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
     private func doneSummary(succeeded: Int, failed: Int) -> String {
@@ -367,14 +459,13 @@ struct HomeView: View {
         return parts.joined(separator: " · ")
     }
 
-    // MARK: - Unfollow helpers
+    // MARK: - Cleanup helpers
 
-    private func triggerUnfollow() {
-        // Warn if user has whitelists but none is currently active
+    private func triggerCleanup() {
         if !store.whitelists.isEmpty && store.activeID == nil {
             showWhitelistWarning = true
         } else {
-            startUnfollowNow()
+            showCleanupConfirm = true
         }
     }
 
@@ -387,6 +478,16 @@ struct HomeView: View {
                 store:     store
             )
         }
+    }
+
+    // MARK: - Auto-sync
+
+    private func triggerAutoSyncIfNeeded() {
+        guard syncService.hasValidSession,
+              case .idle = syncService.state else { return }
+        if let last = lastAutoSync, Date().timeIntervalSince(last) < autoSyncInterval { return }
+        lastAutoSync = Date()
+        Task { await syncService.startSync() }
     }
 
     // MARK: - Instagram API card
@@ -497,115 +598,28 @@ struct HomeView: View {
             followers: syncService.followers,
             following: syncService.following
         )
-        store.resetDone()
+        // Only reset done-state after a full sync. A partial sync doesn't
+        // fetch all pages, so unfollowed users may still be in the following
+        // cache. Resetting done markers here would make them reappear in the
+        // cleanup queue even though they were already processed.
+        if syncService.lastSyncWasFull {
+            store.resetDone()
+        }
         store.prune(keeping: Set(notFollowingBack))
         store.recordUpdate()
     }
 
-    // MARK: - Import column (kept for future re-enable)
+    // MARK: - Import (kept for future re-enable, not shown in UI)
 
     private var importCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Import data")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.espresso)
-            HStack(spacing: 12) {
-                importColumn(label: "Followers", type: .followers, status: followersStatus)
-                importColumn(label: "Following", type: .following, status: followingStatus)
-            }
         }
         .padding(16)
         .background(Color.foam)
         .clipShape(RoundedRectangle(cornerRadius: 16))
-    }
-
-    @ViewBuilder
-    private func importColumn(label: String, type: Expecting, status: ImportStatus) -> some View {
-        VStack(spacing: 6) {
-            Button {
-                expecting = type
-                showImporter = true
-            } label: {
-                Label(label, systemImage: type == .followers ? "person.2.fill" : "person.badge.plus")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(Color.latte.opacity(0.2))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(Color.roast)
-            .disabled(status == .importing)
-
-            statusLabel(for: status)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private func statusLabel(for status: ImportStatus) -> some View {
-        switch status {
-        case .idle:
-            Text("No file selected")
-                .font(.caption)
-                .foregroundStyle(Color.latte.opacity(0.8))
-        case .importing:
-            HStack(spacing: 4) {
-                ProgressView().controlSize(.mini).tint(Color.roast)
-                Text("Reading…").font(.caption).foregroundStyle(Color.latte)
-            }
-        case .success(let info):
-            HStack(spacing: 4) {
-                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.roast)
-                Text(info)
-            }
-            .font(.caption).foregroundStyle(Color.roast)
-        case .error(let message):
-            HStack(spacing: 4) {
-                Image(systemName: "exclamationmark.circle.fill")
-                Text(message).lineLimit(2)
-            }
-            .font(.caption).foregroundStyle(.red)
-        }
-    }
-
-    private func handleImport(_ result: Result<[URL], Error>, type: Expecting) async {
-        setStatus(.importing, for: type)
-        do {
-            let urls = try result.get()
-            guard let url = urls.first else { setStatus(.idle, for: type); return }
-            guard url.startAccessingSecurityScopedResource() else {
-                setStatus(.error("Permission denied accessing file"), for: type)
-                return
-            }
-            defer { url.stopAccessingSecurityScopedResource() }
-            let data = try Data(contentsOf: url)
-            let usernames = try InstagramExportParser.parseUsernames(from: data)
-            let countLabel = type == .followers
-                ? "\(usernames.count) followers"
-                : "\(usernames.count) following"
-            if type == .followers { followersData = data } else { followingData = data }
-            setStatus(.success(countLabel), for: type)
-            do { try recompute() } catch { setStatus(.error(error.localizedDescription), for: type) }
-        } catch {
-            setStatus(.error("Import failed: \(error.localizedDescription)"), for: type)
-        }
-    }
-
-    private func setStatus(_ status: ImportStatus, for type: Expecting) {
-        if type == .followers { followersStatus = status } else { followingStatus = status }
-    }
-
-    private func recompute() throws {
-        guard let followersData, let followingData else { return }
-        let followers = try InstagramExportParser.parseUsernames(from: followersData)
-        let following = try InstagramExportParser.parseUsernames(from: followingData)
-        notFollowingBack = InstagramExportParser.computeNotFollowingBack(
-            followers: followers,
-            following: following
-        )
-        store.resetDone()
-        store.prune(keeping: Set(notFollowingBack))
-        store.recordUpdate()
     }
 }
 

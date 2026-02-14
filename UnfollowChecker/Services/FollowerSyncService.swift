@@ -41,6 +41,9 @@ final class FollowerSyncService {
     private(set) var lastSyncDate:      Date?
     /// Date of the last full sync (used for the 7-day schedule)
     private(set) var lastFullSyncDate:  Date?
+    /// `true` when the most recently completed sync was a full sync.
+    /// Used by the UI to decide whether to reset done-state.
+    private(set) var lastSyncWasFull:   Bool = false
 
     // MARK: - Configuration
 
@@ -181,7 +184,8 @@ final class FollowerSyncService {
             let newCache = PersistedCache(metadata: metadata, followers: mergedFollowers, following: mergedFollowing)
             save(cache: newCache)
             applyCache(newCache)
-            lastSyncDate = now
+            lastSyncDate    = now
+            lastSyncWasFull = false
             state = .done
 
         } catch {
@@ -234,6 +238,7 @@ final class FollowerSyncService {
             applyCache(newCache)
             lastSyncDate     = now
             lastFullSyncDate = now
+            lastSyncWasFull  = true
             state = .done
 
         } catch {
