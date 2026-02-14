@@ -135,6 +135,22 @@ final class InstagramAPIService {
         }
     }
 
+    // MARK: - Unfollow
+
+    /// Destroys the following relationship with `userId` (also cancels a pending follow request).
+    func unfollow(userId: String) async throws {
+        guard let url = URL(string: "https://i.instagram.com/api/v1/friendships/destroy/\(userId)/") else {
+            throw InstagramAPIError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = "user_id=\(userId)".data(using: .utf8)
+        try applyHeaders(to: &request)
+        let (_, response) = try await urlSession.data(for: request)
+        try validateResponse(response)
+    }
+
     // MARK: - Helpers
 
     private func applyHeaders(to request: inout URLRequest) throws {

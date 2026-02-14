@@ -93,20 +93,22 @@ struct Edge: Decodable {
 }
 
 struct EdgeNode: Decodable {
-    let pk:            String?
-    let id:            String?
-    let username:      String
-    let fullName:      String?
-    let profilePicUrl: String?
-    let isPrivate:     Bool?
-    let isVerified:    Bool?
+    let pk:                String?
+    let id:                String?
+    let username:          String
+    let fullName:          String?
+    let profilePicUrl:     String?
+    let isPrivate:         Bool?
+    let isVerified:        Bool?
+    let requestedByViewer: Bool?   // true when we sent a follow request they haven't accepted
 
     enum CodingKeys: String, CodingKey {
         case pk, id, username
-        case fullName      = "full_name"
-        case profilePicUrl = "profile_pic_url"
-        case isPrivate     = "is_private"
-        case isVerified    = "is_verified"
+        case fullName          = "full_name"
+        case profilePicUrl     = "profile_pic_url"
+        case isPrivate         = "is_private"
+        case isVerified        = "is_verified"
+        case requestedByViewer = "requested_by_viewer"
     }
 }
 

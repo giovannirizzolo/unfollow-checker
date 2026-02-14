@@ -44,7 +44,8 @@ struct HomeView: View {
     @State private var navigateToAssist = false
 
     // Instagram API
-    @State private var syncService = FollowerSyncService()
+    @State private var syncService    = FollowerSyncService()
+    @State private var unfollowService = UnfollowService()
     @State private var showLogin = false
     @State private var syncError: String?
 
@@ -66,8 +67,12 @@ struct HomeView: View {
             homeTab
                 .tabItem { Label("Home", systemImage: "house.fill") }
 
-            ListTab(notFollowingBack: notFollowingBack)
-                .tabItem { Label("List", systemImage: "list.bullet") }
+            ListTab(
+                notFollowingBack:   notFollowingBack,
+                requestedUsernames: syncService.requestedUsernames,
+                userPks:            syncService.userPks
+            )
+            .tabItem { Label("List", systemImage: "list.bullet") }
 
             WhitelistView(notFollowingBack: notFollowingBack)
                 .tabItem { Label("Whitelist", systemImage: "star.fill") }
@@ -75,6 +80,7 @@ struct HomeView: View {
         }
         .tint(Color.roast)
         .environment(store)
+        .environment(unfollowService)
         .fileImporter(
             isPresented: $showImporter,
             allowedContentTypes: [.json],

@@ -3,7 +3,7 @@
 //  UnfollowChecker
 //
 
-import SwiftUI
+internal import SwiftUI
 import UIKit
 import WebKit
 
