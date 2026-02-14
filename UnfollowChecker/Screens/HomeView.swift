@@ -30,7 +30,7 @@ extension Date {
 
 struct HomeView: View {
 
-    // Import state
+    // Import state (kept for future re-enable)
     @State private var followersData: Data?
     @State private var followingData: Data?
     @State private var followersStatus: ImportStatus = .idle
@@ -41,13 +41,15 @@ struct HomeView: View {
     // Results
     @State private var notFollowingBack: [String] = []
     @State private var store = WhitelistStore()
-    @State private var navigateToAssist = false
 
     // Instagram API
-    @State private var syncService    = FollowerSyncService()
+    @State private var syncService     = FollowerSyncService()
     @State private var unfollowService = UnfollowService()
-    @State private var showLogin = false
+    @State private var showLogin       = false
     @State private var syncError: String?
+
+    // Unfollow gate
+    @State private var showWhitelistWarning = false
 
     var cleanupUsers: [String] {
         notFollowingBack.filter { !store.isWhitelisted($0) && !store.isDone($0) }
@@ -81,14 +83,6 @@ struct HomeView: View {
         .tint(Color.roast)
         .environment(store)
         .environment(unfollowService)
-        .fileImporter(
-            isPresented: $showImporter,
-            allowedContentTypes: [.json],
-            allowsMultipleSelection: false
-        ) { result in
-            let type = expecting
-            Task { await handleImport(result, type: type) }
-        }
     }
 
     // MARK: - Home tab
@@ -100,9 +94,9 @@ struct HomeView: View {
                 ScrollView {
                     VStack(spacing: 20) {
                         counterCard
-                        ctaButton
+                        unfollowCard
                         apiCard
-                        importCard
+                        // importCard
                     }
                     .padding(16)
                 }
@@ -111,11 +105,7 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(Color.foam, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
-            .navigationDestination(isPresented: $navigateToAssist) {
-                AssistModeView(users: cleanupUsers)
-            }
             .task {
-                // Auto-restore on every launch; .onChange handles applying the data
                 syncService.restoreFromCache()
             }
             .fullScreenCover(isPresented: $showLogin) {
@@ -137,42 +127,65 @@ struct HomeView: View {
             } message: {
                 Text(syncError ?? "")
             }
+            .alert("Whitelist not active", isPresented: $showWhitelistWarning) {
+                Button("Unfollow all \(cleanupUsers.count)", role: .destructive) {
+                    startUnfollowNow()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You have a whitelist but it's not currently enabled. Every user who doesn't follow you back will be unfollowed. Go to the Whitelist tab to activate protection first.")
+            }
         }
     }
 
+    // MARK: - Counter card
+
     private var counterCard: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 10) {
-                Image(systemName: "cup.and.saucer.fill")
-                    .font(.title2)
-                    .foregroundStyle(Color.latte)
-                Text("\(notFollowingBack.count)")
-                    .font(.system(size: 64, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color.espresso)
-            }
-            Text("don't follow you back")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Color.latte)
-
-            if whitelistedCount > 0 || doneCount > 0 {
-                HStack(spacing: 16) {
-                    if whitelistedCount > 0 {
-                        Label("\(whitelistedCount) whitelisted", systemImage: "star.fill")
-                    }
-                    if doneCount > 0 {
-                        Label("\(doneCount) done", systemImage: "checkmark.circle.fill")
-                    }
+            if syncService.lastSyncDate != nil {
+                HStack(spacing: 10) {
+                    Text("💀")
+                        .font(.title2)
+                    Text("\(notFollowingBack.count)")
+                        .font(.system(size: 64, weight: .bold, design: .rounded))
+                        .foregroundStyle(Color.espresso)
                 }
-                .font(.caption)
-                .foregroundStyle(Color.latte)
-                .padding(.top, 2)
-            }
+                Text("don't follow you back")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Color.latte)
 
-            if let date = store.lastUpdated {
-                Text("Updated \(date.relativeFormatted)")
-                    .font(.caption2)
-                    .foregroundStyle(Color.latte.opacity(0.7))
+                if whitelistedCount > 0 || doneCount > 0 {
+                    HStack(spacing: 16) {
+                        if whitelistedCount > 0 {
+                            Label("\(whitelistedCount) whitelisted", systemImage: "star.fill")
+                        }
+                        if doneCount > 0 {
+                            Label("\(doneCount) done", systemImage: "checkmark.circle.fill")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(Color.latte)
                     .padding(.top, 2)
+                }
+
+                if let date = syncService.lastSyncDate {
+                    Text("Synced \(date.relativeFormatted)")
+                        .font(.caption2)
+                        .foregroundStyle(Color.latte.opacity(0.7))
+                        .padding(.top, 2)
+                }
+            } else {
+                Text("💀")
+                    .font(.system(size: 40))
+                    .opacity(0.4)
+                    .padding(.bottom, 4)
+                Text("No data yet")
+                    .font(.headline)
+                    .foregroundStyle(Color.latte)
+                Text("Connect Instagram to see who doesn't follow you back")
+                    .font(.caption)
+                    .foregroundStyle(Color.latte.opacity(0.7))
+                    .multilineTextAlignment(.center)
             }
         }
         .frame(maxWidth: .infinity)
@@ -181,30 +194,165 @@ struct HomeView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
-    private var ctaButton: some View {
-        Button {
-            navigateToAssist = true
-        } label: {
-            Text("Start cleanup")
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(cleanupUsers.isEmpty ? Color.latte.opacity(0.35) : Color.roast)
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-        }
-        .buttonStyle(.borderless)
-        .disabled(cleanupUsers.isEmpty)
-    }
+    // MARK: - Unfollow card
 
-    private var importCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Import data")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.espresso)
-            HStack(spacing: 12) {
-                importColumn(label: "Followers", type: .followers, status: followersStatus)
-                importColumn(label: "Following", type: .following, status: followingStatus)
+    private var unfollowCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            switch unfollowService.state {
+
+            // ── Idle / failed: primary action button ──────────────────────────
+            case .idle, .failed:
+                if syncService.lastSyncDate == nil {
+                    // No sync yet — can't unfollow
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(Color.latte)
+                        Text("Sync your Instagram account first")
+                            .font(.caption)
+                            .foregroundStyle(Color.latte)
+                    }
+                } else if cleanupUsers.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.seal.fill")
+                            .foregroundStyle(Color.roast)
+                        Text("No users to unfollow right now")
+                            .font(.caption)
+                            .foregroundStyle(Color.latte)
+                    }
+                } else {
+                    if case .failed(let msg) = unfollowService.state {
+                        Text(msg)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    Button { triggerUnfollow() } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.fill.xmark")
+                            Text("Unfollow All (\(cleanupUsers.count))")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(Color.roast)
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+                    .buttonStyle(.borderless)
+                }
+
+            // ── Running: fancy progress widget ────────────────────────────────
+            case .running(let cur, let tot):
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Unfollowing…")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(Color.espresso)
+                        Spacer()
+                        Text("\(cur) / \(tot)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color.latte)
+                    }
+
+                    // Fancy gradient progress bar
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.latte.opacity(0.18))
+                                .frame(height: 10)
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color.latte, Color.roast],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(
+                                    width: tot > 0
+                                        ? max(20, geo.size.width * CGFloat(cur) / CGFloat(tot))
+                                        : 0,
+                                    height: 10
+                                )
+                                .animation(.easeInOut(duration: 0.35), value: cur)
+                        }
+                    }
+                    .frame(height: 10)
+
+                    Button {
+                        unfollowService.pause()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.latte.opacity(0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Color.roast)
+                }
+
+            // ── Paused ────────────────────────────────────────────────────────
+            case .paused:
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pause.circle.fill")
+                            .foregroundStyle(Color.latte)
+                        Text("Unfollow paused")
+                            .font(.subheadline)
+                            .foregroundStyle(Color.espresso)
+                    }
+                    HStack(spacing: 8) {
+                        Button { triggerUnfollow() } label: {
+                            Label("Resume", systemImage: "play.fill")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color.roast.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.roast)
+
+                        Button {
+                            unfollowService.state = .idle
+                        } label: {
+                            Text("Dismiss")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 8)
+                                .background(Color.latte.opacity(0.12))
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.latte)
+                    }
+                }
+
+            // ── Done: summary ─────────────────────────────────────────────────
+            case .done(let succeeded, let failed):
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Color.roast)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Done!")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.espresso)
+                            Text(doneSummary(succeeded: succeeded, failed: failed))
+                                .font(.caption)
+                                .foregroundStyle(Color.latte)
+                        }
+                    }
+                    Button {
+                        unfollowService.state = .idle
+                    } label: {
+                        Text("Dismiss")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(Color.latte.opacity(0.12))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Color.latte)
+                }
             }
         }
         .padding(16)
@@ -212,13 +360,45 @@ struct HomeView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
     }
 
+    private func doneSummary(succeeded: Int, failed: Int) -> String {
+        var parts: [String] = []
+        if succeeded > 0 { parts.append("Unfollowed \(succeeded)") }
+        if failed    > 0 { parts.append("\(failed) unavailable") }
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: - Unfollow helpers
+
+    private func triggerUnfollow() {
+        // Warn if user has whitelists but none is currently active
+        if !store.whitelists.isEmpty && store.activeID == nil {
+            showWhitelistWarning = true
+        } else {
+            startUnfollowNow()
+        }
+    }
+
+    private func startUnfollowNow() {
+        let targets = cleanupUsers.filter { !syncService.requestedUsernames.contains($0) }
+        Task {
+            await unfollowService.startUnfollow(
+                usernames: targets,
+                pks:       syncService.userPks,
+                store:     store
+            )
+        }
+    }
+
     // MARK: - Instagram API card
 
     private var apiCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Instagram connect")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.espresso)
+            HStack(spacing: 6) {
+                Text("📸")
+                Text("Instagram connect")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.espresso)
+            }
 
             switch syncService.state {
             case .idle:
@@ -245,16 +425,30 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.roast)
-                        if let date = syncService.lastSyncDate {
-                            Text("Synced \(date.relativeFormatted)")
-                                .font(.caption).foregroundStyle(Color.roast)
-                        } else {
-                            Text("Data loaded").font(.caption).foregroundStyle(Color.roast)
+                        VStack(alignment: .leading, spacing: 2) {
+                            if let date = syncService.lastSyncDate {
+                                Text("Synced \(date.relativeFormatted)")
+                                    .font(.caption).foregroundStyle(Color.roast)
+                            } else {
+                                Text("Data loaded").font(.caption).foregroundStyle(Color.roast)
+                            }
+                            let modeLabel = syncService.nextSyncMode == .full
+                                ? "Next: full sync"
+                                : "Next: partial sync"
+                            Text(modeLabel)
+                                .font(.caption2).foregroundStyle(Color.latte.opacity(0.7))
                         }
                     }
                     if syncService.hasValidSession {
-                        syncButton(label: "Sync again", icon: "arrow.clockwise") {
-                            Task { await syncService.startSync() }
+                        HStack(spacing: 8) {
+                            syncButton(label: "Sync", icon: "arrow.clockwise") {
+                                Task { await syncService.startSync() }
+                            }
+                            if syncService.nextSyncMode == .partial {
+                                syncButton(label: "Full sync", icon: "arrow.clockwise.circle") {
+                                    Task { await syncService.startFullSync() }
+                                }
+                            }
                         }
                     }
                 }
@@ -308,7 +502,22 @@ struct HomeView: View {
         store.recordUpdate()
     }
 
-    // MARK: - Import column
+    // MARK: - Import column (kept for future re-enable)
+
+    private var importCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Import data")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.espresso)
+            HStack(spacing: 12) {
+                importColumn(label: "Followers", type: .followers, status: followersStatus)
+                importColumn(label: "Following", type: .following, status: followingStatus)
+            }
+        }
+        .padding(16)
+        .background(Color.foam)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
 
     @ViewBuilder
     private func importColumn(label: String, type: Expecting, status: ImportStatus) -> some View {
@@ -358,8 +567,6 @@ struct HomeView: View {
             .font(.caption).foregroundStyle(.red)
         }
     }
-
-    // MARK: - Import handling
 
     private func handleImport(_ result: Result<[URL], Error>, type: Expecting) async {
         setStatus(.importing, for: type)

@@ -121,3 +121,14 @@ struct PageInfo: Decodable {
         case endCursor   = "end_cursor"
     }
 }
+
+// MARK: - Fetch result
+
+struct FetchResult {
+    /// Nodes returned — may be partial if early-stopped or maxPages was hit.
+    let nodes:         [EdgeNode]
+    /// `true` when we reached the final page; `false` when stopped early.
+    let fetchedAll:    Bool
+    /// Total count reported by the API (`count` field on the connection).
+    let apiTotalCount: Int
+}

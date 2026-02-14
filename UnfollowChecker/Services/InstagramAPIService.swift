@@ -52,26 +52,38 @@ final class InstagramAPIService {
 
     // MARK: - Followers / Following
 
-    func fetchAllFollowers(
-        userId: String,
+    /// Fetch followers, optionally stopping after `maxPages` pages.
+    /// Pass `knownIDs` to enable the early-stop heuristic (stops after 2
+    /// consecutive fully-known pages, starting from page 3 onwards).
+    func fetchFollowers(
+        userId:     String,
+        maxPages:   Int?          = nil,
+        knownIDs:   Set<String>   = [],
         onProgress: @MainActor @escaping (Int, Int) -> Void
-    ) async throws -> [EdgeNode] {
+    ) async throws -> FetchResult {
         try await fetchAll(
             queryHash: "c76146de99bb02f6415203be841dd25a",
-            userId: userId,
-            edgeType: .followers,
+            userId:    userId,
+            edgeType:  .followers,
+            maxPages:  maxPages,
+            knownIDs:  knownIDs,
             onProgress: onProgress
         )
     }
 
-    func fetchAllFollowing(
-        userId: String,
+    /// Fetch following, optionally stopping after `maxPages` pages.
+    func fetchFollowing(
+        userId:     String,
+        maxPages:   Int?          = nil,
+        knownIDs:   Set<String>   = [],
         onProgress: @MainActor @escaping (Int, Int) -> Void
-    ) async throws -> [EdgeNode] {
+    ) async throws -> FetchResult {
         try await fetchAll(
             queryHash: "d04b0a864b4b54837c0d870b0e77e076",
-            userId: userId,
-            edgeType: .following,
+            userId:    userId,
+            edgeType:  .following,
+            maxPages:  maxPages,
+            knownIDs:  knownIDs,
             onProgress: onProgress
         )
     }
@@ -81,23 +93,54 @@ final class InstagramAPIService {
     private enum EdgeType { case followers, following }
 
     private func fetchAll(
-        queryHash: String,
-        userId: String,
-        edgeType: EdgeType,
+        queryHash:  String,
+        userId:     String,
+        edgeType:   EdgeType,
+        maxPages:   Int?,
+        knownIDs:   Set<String>,
         onProgress: @MainActor @escaping (Int, Int) -> Void
-    ) async throws -> [EdgeNode] {
-        var results: [EdgeNode] = []
-        var cursor:  String?    = nil
+    ) async throws -> FetchResult {
+        var results:               [EdgeNode] = []
+        var cursor:                String?    = nil
+        var pagesFetched                      = 0
+        var consecutiveKnownPages             = 0
+        var apiTotalCount                     = 0
 
         repeat {
             try await rateLimiter.wait()
-            let connection = try await fetchPage(queryHash: queryHash, userId: userId, cursor: cursor, edgeType: edgeType)
-            results.append(contentsOf: connection.edges.map(\.node))
-            await onProgress(results.count, connection.count)
+            let connection = try await fetchPage(
+                queryHash: queryHash, userId: userId, cursor: cursor, edgeType: edgeType
+            )
+            apiTotalCount = connection.count
+            let pageNodes = connection.edges.map(\.node)
+            results.append(contentsOf: pageNodes)
+            pagesFetched += 1
+            onProgress(results.count, connection.count)
+
+            // Early-stop: once we've fetched at least 2 pages and have a reference set,
+            // count consecutive pages where every node is already in knownIDs.
+            // Two such pages in a row means the feed has stabilised — stop.
+            if pagesFetched >= 2, !knownIDs.isEmpty {
+                if pageNodes.allSatisfy({ knownIDs.contains($0.username) }) {
+                    consecutiveKnownPages += 1
+                    if consecutiveKnownPages >= 2 {
+                        return FetchResult(nodes: results, fetchedAll: false, apiTotalCount: apiTotalCount)
+                    }
+                } else {
+                    consecutiveKnownPages = 0
+                }
+            }
+
+            // Hard page cap (used by partial sync).
+            if let maxPages, pagesFetched >= maxPages {
+                let hasMore = connection.pageInfo.hasNextPage
+                return FetchResult(nodes: results, fetchedAll: !hasMore, apiTotalCount: apiTotalCount)
+            }
+
             cursor = connection.pageInfo.hasNextPage ? connection.pageInfo.endCursor : nil
         } while cursor != nil
 
-        return results
+        return FetchResult(nodes: results, fetchedAll: true, apiTotalCount: apiTotalCount)
     }
 
     private func fetchPage(
